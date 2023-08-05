@@ -75,7 +75,7 @@ impl Permissions {
         unimplemented!()
     }
 
-    pub fn execute(&self) -> bool {
+    pub fn exec(&self) -> bool {
         unimplemented!()
     }
 }

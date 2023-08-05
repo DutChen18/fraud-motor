@@ -1,29 +1,29 @@
-use crate::sys::windows::api::*;
-use crate::sys::windows::{self, Handle};
+use crate::sys::windows::{self, api, Handle};
 use std::marker::PhantomData;
+use std::mem::{self, MaybeUninit};
 use std::path::{Path, PathBuf};
-use std::{io, iter, mem, ptr, vec};
+use std::{io, iter, ptr, slice, str, vec};
 
-pub struct List(vec::IntoIter<DWORD>);
+pub struct List(vec::IntoIter<api::DWORD>);
 
 pub struct Process(Handle);
 
 pub struct Regions<'a> {
-    handle: HANDLE,
-    address: Option<SIZE_T>,
+    handle: api::HANDLE,
+    addr: Option<api::SIZE_T>,
     phantom: PhantomData<&'a Process>,
 }
 
 pub struct Region {
-    info: MEMORY_BASIC_INFORMATION,
+    info: api::MEMORY_BASIC_INFORMATION,
     path: Option<PathBuf>,
 }
 
-pub struct Permissions(DWORD);
+pub struct Permissions(api::DWORD);
 
 pub struct Memory(Handle);
 
-pub struct Options(DWORD);
+pub struct Options(api::DWORD);
 
 impl Iterator for List {
     type Item = io::Result<u32>;
@@ -35,28 +35,39 @@ impl Iterator for List {
 
 impl Process {
     pub fn open(id: u32) -> io::Result<Process> {
-        windows::check(unsafe {
-            processthreadsapi::OpenProcess(winnt::PROCESS_QUERY_INFORMATION, minwindef::FALSE, id)
-        })
-        .map(|handle| Process(Handle(handle)))
+        unsafe {
+            let handle = windows::check(api::OpenProcess(
+                api::PROCESS_QUERY_INFORMATION,
+                api::FALSE,
+                id,
+            ))?;
+
+            Ok(Process(Handle(handle)))
+        }
     }
 
     pub fn regions(&self) -> io::Result<Regions> {
         Ok(Regions {
             handle: *self.0,
-            address: Some(0),
+            addr: Some(0),
             phantom: PhantomData,
         })
     }
 
     pub fn path(&self) -> io::Result<PathBuf> {
-        let mut buf = [0; minwindef::MAX_PATH];
+        unsafe {
+            let mut buf: [MaybeUninit<u8>; api::MAX_PATH] = MaybeUninit::uninit().assume_init();
 
-        windows::check(unsafe {
-            psapi::GetProcessImageFileNameA(*self.0, buf.as_mut_ptr() as LPSTR, buf.len() as DWORD)
-        })
-        .map(|size| String::from_utf8_lossy(&buf[..size as usize]))
-        .map(|string| string.into_owned().into())
+            let size = windows::check(api::GetProcessImageFileNameA(
+                *self.0,
+                buf.as_mut_ptr() as api::LPSTR,
+                buf.len() as api::DWORD,
+            ))? as usize;
+
+            let buf = slice::from_raw_parts(buf.as_ptr() as *const u8, size);
+
+            Ok(str::from_utf8_unchecked(buf).into())
+        }
     }
 }
 
@@ -65,52 +76,50 @@ impl<'a> Iterator for Regions<'a> {
 
     fn next(&mut self) -> Option<io::Result<Region>> {
         iter::from_fn(|| {
-            self.address.map(|address| unsafe {
-                let mut info = mem::zeroed();
+            self.addr.map(|addr| unsafe {
+                let mut info = MaybeUninit::uninit();
 
-                windows::check(memoryapi::VirtualQueryEx(
+                windows::check(api::VirtualQueryEx(
                     self.handle,
-                    address as LPCVOID,
-                    &mut info,
+                    addr as api::LPCVOID,
+                    info.as_mut_ptr(),
                     mem::size_of_val(&info),
-                ))
-                .map(|_| self.address = address.checked_add(info.RegionSize))
-                .map(|_| info)
-            })
-        })
-        .take_while(|result| {
-            !result.as_ref().is_err_and(|err| {
-                err.raw_os_error()
-                    .is_some_and(|err| err as DWORD == winerror::ERROR_INVALID_PARAMETER)
-            })
-        })
-        .find(|result| {
-            !result
-                .as_ref()
-                .is_ok_and(|info| info.State & winnt::MEM_COMMIT == 0)
-        })
-        .map(|result| {
-            result.and_then(|info| {
-                let path = if info.Type & (winnt::MEM_IMAGE | winnt::MEM_MAPPED) == 0 {
-                    None
-                } else {
-                    let mut buf = [0; minwindef::MAX_PATH];
+                ))?;
 
-                    windows::check(unsafe {
-                        psapi::GetMappedFileNameA(
-                            self.handle,
-                            info.BaseAddress,
-                            buf.as_mut_ptr() as LPSTR,
-                            buf.len() as DWORD,
-                        )
-                    })
-                    .map(|size| String::from_utf8_lossy(&buf[..size as usize]))
-                    .map(|string| Some(string.into_owned().into()))?
-                };
+                let info = info.assume_init();
 
-                Ok(Region { info, path })
+                self.addr = addr.checked_add(info.RegionSize);
+                io::Result::Ok(info)
             })
         })
+        .take_while(|info| {
+            info.as_ref().err().and_then(io::Error::raw_os_error)
+                != Some(api::ERROR_INVALID_PARAMETER as i32)
+        })
+        .map(|info| unsafe {
+            let info = info?;
+
+            if info.State & api::MEM_COMMIT == 0 {
+                Ok(None)
+            } else if info.Type & (api::MEM_IMAGE | api::MEM_MAPPED) == 0 {
+                Ok(Some(Region { info, path: None }))
+            } else {
+                let mut buf: [MaybeUninit<u8>; api::MAX_PATH] = MaybeUninit::uninit().assume_init();
+
+                let size = windows::check(api::GetMappedFileNameA(
+                    self.handle,
+                    info.BaseAddress,
+                    buf.as_mut_ptr() as api::LPSTR,
+                    buf.len() as api::DWORD,
+                ))? as usize;
+
+                let buf = slice::from_raw_parts(buf.as_ptr() as *const u8, size);
+                let path = Some(str::from_utf8_unchecked(buf).into());
+
+                Ok(Some(Region { info, path }))
+            }
+        })
+        .find_map(Result::transpose)
     }
 }
 
@@ -133,66 +142,60 @@ impl Region {
 }
 
 impl Permissions {
+    const EXEC_WRITE: api::DWORD = api::PAGE_EXECUTE_READWRITE | api::PAGE_EXECUTE_WRITECOPY;
+    const EXEC_READ: api::DWORD = api::PAGE_EXECUTE_READ | Permissions::EXEC_WRITE;
+    const EXEC: api::DWORD = api::PAGE_EXECUTE | Permissions::EXEC_READ;
+    const WRITE: api::DWORD = api::PAGE_READWRITE | api::PAGE_WRITECOPY | Permissions::EXEC_WRITE;
+    const READ: api::DWORD = api::PAGE_READONLY | Permissions::WRITE | Permissions::EXEC_READ;
+
     pub fn read(&self) -> bool {
-        self.0
-            & (winnt::PAGE_EXECUTE_READ
-                | winnt::PAGE_EXECUTE_READWRITE
-                | winnt::PAGE_EXECUTE_WRITECOPY
-                | winnt::PAGE_READONLY
-                | winnt::PAGE_READWRITE
-                | winnt::PAGE_WRITECOPY)
-            != 0
+        self.0 & Permissions::READ != 0
     }
 
     pub fn write(&self) -> bool {
-        self.0
-            & (winnt::PAGE_EXECUTE_READWRITE
-                | winnt::PAGE_EXECUTE_WRITECOPY
-                | winnt::PAGE_READWRITE
-                | winnt::PAGE_WRITECOPY)
-            != 0
+        self.0 & Permissions::WRITE != 0
     }
 
-    pub fn execute(&self) -> bool {
-        self.0
-            & (winnt::PAGE_EXECUTE
-                | winnt::PAGE_EXECUTE_READ
-                | winnt::PAGE_EXECUTE_READWRITE
-                | winnt::PAGE_EXECUTE_WRITECOPY)
-            != 0
+    pub fn exec(&self) -> bool {
+        self.0 & Permissions::EXEC != 0
     }
 }
 
 impl Memory {
     pub fn open(id: u32, options: &Options) -> io::Result<Memory> {
-        windows::check(unsafe { processthreadsapi::OpenProcess(options.0, minwindef::FALSE, id) })
-            .map(|handle| Memory(Handle(handle)))
+        unsafe {
+            let handle = windows::check(api::OpenProcess(options.0, api::FALSE, id))?;
+
+            Ok(Memory(Handle(handle)))
+        }
     }
 
     pub fn read(&self, buf: &mut [u8], addr: usize) -> io::Result<()> {
-        windows::check(unsafe {
-            memoryapi::ReadProcessMemory(
+        unsafe {
+            windows::check(api::ReadProcessMemory(
                 *self.0,
-                addr as LPCVOID,
-                buf.as_mut_ptr() as LPVOID,
+                addr as api::LPCVOID,
+                buf.as_mut_ptr() as api::LPVOID,
                 buf.len(),
                 ptr::null_mut(),
-            )
-        })
-        .map(|_| ())
+            ))?;
+
+            Ok(())
+        }
     }
 
     pub fn write(&self, buf: &[u8], addr: usize) -> io::Result<()> {
-        windows::check(unsafe {
-            memoryapi::WriteProcessMemory(
+        unsafe {
+            windows::check(api::WriteProcessMemory(
                 *self.0,
-                addr as LPVOID,
-                buf.as_ptr() as LPCVOID,
+                addr as api::LPVOID,
+                buf.as_ptr() as api::LPCVOID,
                 buf.len(),
                 ptr::null_mut(),
-            )
-        })
-        .map(|_| ())
+            ))?;
+
+            Ok(())
+        }
     }
 }
 
@@ -202,32 +205,35 @@ impl Options {
     }
 
     pub fn read(&mut self, read: bool) -> &mut Options {
-        self.0 &= !winnt::PROCESS_VM_READ;
-        self.0 |= winnt::PROCESS_VM_READ * read as DWORD;
+        self.0 &= !api::PROCESS_VM_READ;
+        self.0 |= api::PROCESS_VM_READ * read as api::DWORD;
         self
     }
 
     pub fn write(&mut self, write: bool) -> &mut Options {
-        self.0 &= !winnt::PROCESS_VM_WRITE;
-        self.0 |= winnt::PROCESS_VM_WRITE * write as DWORD;
+        self.0 &= !api::PROCESS_VM_WRITE;
+        self.0 |= api::PROCESS_VM_WRITE * write as api::DWORD;
         self
     }
 }
 
 pub fn list() -> io::Result<List> {
-    let mut result = vec![0; 1024];
+    unsafe {
+        let mut vec = vec![0; 1024];
 
-    loop {
-        let capacity = (result.len() * mem::size_of::<DWORD>()) as DWORD;
-        let mut size = 0;
+        loop {
+            let capacity = (vec.len() * mem::size_of::<api::DWORD>()) as api::DWORD;
+            let mut size = 0;
 
-        windows::check(unsafe { psapi::EnumProcesses(result.as_mut_ptr(), capacity, &mut size) })?;
+            windows::check(api::EnumProcesses(vec.as_mut_ptr(), capacity, &mut size))?;
 
-        if size != capacity {
-            result.truncate(size as usize / mem::size_of::<DWORD>());
-            break Ok(List(result.into_iter()));
+            if size != capacity {
+                vec.truncate(size as usize / mem::size_of::<api::DWORD>());
+
+                break Ok(List(vec.into_iter()));
+            }
+
+            vec.resize(vec.len() * 2, 0);
         }
-
-        result.resize(result.len() * 2, 0);
     }
 }

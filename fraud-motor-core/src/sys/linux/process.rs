@@ -23,7 +23,7 @@ pub struct Region {
 pub struct Permissions {
     read: bool,
     write: bool,
-    execute: bool,
+    exec: bool,
 }
 
 pub struct Memory(File);
@@ -34,10 +34,11 @@ impl Iterator for List {
     type Item = io::Result<u32>;
 
     fn next(&mut self) -> Option<io::Result<u32>> {
-        self.0
-            .by_ref()
-            .map(|entry| entry.map(|entry| entry.file_name().into_string().ok()?.parse().ok()))
-            .find_map(Result::transpose)
+        self.0.find_map(|entry| {
+            entry
+                .map(|entry| entry.file_name().to_str()?.parse().ok())
+                .transpose()
+        })
     }
 }
 
@@ -47,18 +48,16 @@ impl Process {
     }
 
     pub fn regions(&self) -> io::Result<Regions> {
-        let path = format!("/proc/{}/maps", self.0);
+        let file = File::open(format!("/proc/{}/maps", self.0))?;
 
-        File::open(path).map(|file| Regions {
+        Ok(Regions {
             file: BufReader::new(file).lines(),
             phantom: PhantomData,
         })
     }
 
     pub fn path(&self) -> io::Result<PathBuf> {
-        let path = format!("/proc/{}/exe", self.0);
-
-        fs::read_link(path)
+        fs::read_link(format!("/proc/{}/exe", self.0))
     }
 }
 
@@ -67,22 +66,21 @@ impl<'a> Iterator for Regions<'a> {
 
     fn next(&mut self) -> Option<io::Result<Region>> {
         self.file.next().map(|line| {
-            line.map(|line| {
-                let mut line = line.split_whitespace();
-                let (start, end) = line.next().unwrap().split_once('-').unwrap();
-                let permissions = line.next().unwrap().as_bytes();
-                let path = line.nth(3).filter(|line| line.starts_with('/'));
+            let line = line?;
+            let mut line = line.split_whitespace();
+            let (start, end) = line.next().unwrap().split_once('-').unwrap();
+            let permissions = line.next().unwrap().as_bytes();
+            let path = line.nth(3).filter(|line| line.starts_with('/'));
 
-                Region {
-                    start: usize::from_str_radix(start, 16).unwrap(),
-                    end: usize::from_str_radix(end, 16).unwrap(),
-                    permissions: Permissions {
-                        read: permissions[0] == b'r',
-                        write: permissions[1] == b'w',
-                        execute: permissions[2] == b'x',
-                    },
-                    path: path.map(Into::into),
-                }
+            Ok(Region {
+                start: usize::from_str_radix(start, 16).unwrap(),
+                end: usize::from_str_radix(end, 16).unwrap(),
+                permissions: Permissions {
+                    read: permissions[0] == b'r',
+                    write: permissions[1] == b'w',
+                    exec: permissions[2] == b'x',
+                },
+                path: path.map(Into::into),
             })
         })
     }
@@ -115,16 +113,14 @@ impl Permissions {
         self.write
     }
 
-    pub fn execute(&self) -> bool {
-        self.execute
+    pub fn exec(&self) -> bool {
+        self.exec
     }
 }
 
 impl Memory {
     pub fn open(id: u32, options: &Options) -> io::Result<Memory> {
-        let path = format!("/proc/{}/mem", id);
-
-        options.0.open(path).map(Memory)
+        options.0.open(format!("/proc/{}/mem", id)).map(Memory)
     }
 
     pub fn read(&self, buf: &mut [u8], addr: usize) -> io::Result<()> {

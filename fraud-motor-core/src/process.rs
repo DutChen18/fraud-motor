@@ -73,8 +73,8 @@ impl Permissions {
         self.0.write()
     }
 
-    pub fn execute(&self) -> bool {
-        self.0.execute()
+    pub fn exec(&self) -> bool {
+        self.0.exec()
     }
 }
 
@@ -115,86 +115,91 @@ pub fn list() -> io::Result<List> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{env, process, ptr};
 
     fn find_region(regions: &[Region], addr: usize) -> &Region {
         regions
-            .iter()
+            .into_iter()
             .find(|region| region.start() <= addr && addr < region.end())
             .unwrap()
     }
 
     #[test]
     fn test_list() {
-        let ids: Vec<_> = list().unwrap().map(Result::unwrap).collect();
+        let ids: Vec<_> = list().unwrap().collect::<io::Result<_>>().unwrap();
 
-        assert!(ids.contains(&std::process::id()));
+        assert!(ids.contains(&process::id()));
         assert!(ids.len() > 1);
     }
 
     #[test]
     fn test_process_regions() {
-        static mut DATA: u32 = 0;
-        static RODATA: u32 = 0;
-        let stack = 0;
-        let heap = Box::leak(Box::new(0));
+        static mut DATA_VAR: u32 = 0;
+        static RODATA_VAR: u32 = 0;
+        let stack_var = 0;
+        let heap_var = Box::leak(Box::new(0));
 
-        let process = Process::open(std::process::id()).unwrap();
-        let regions: Vec<_> = process.regions().unwrap().map(Result::unwrap).collect();
-        let current_exe = std::env::current_exe().unwrap();
-        let file = current_exe.file_name().unwrap();
+        let proc = Process::open(process::id()).unwrap();
+        let regions: Vec<_> = proc.regions().unwrap().collect::<io::Result<_>>().unwrap();
+        let exe_path = env::current_exe().unwrap();
+        let exe_name = exe_path.file_name().unwrap();
+        let mut start = 0;
 
-        let text_region = find_region(&regions, test_process_regions as usize);
-        let data_region = find_region(&regions, unsafe { std::ptr::addr_of!(DATA) } as usize);
-        let rodata_region = find_region(&regions, std::ptr::addr_of!(RODATA) as usize);
-        let stack_region = find_region(&regions, std::ptr::addr_of!(stack) as usize);
-        let heap_region = find_region(&regions, std::ptr::addr_of!(*heap) as usize);
+        for region in &regions {
+            assert!(region.start() >= start);
+            start = region.end();
+        }
 
-        assert!(text_region.permissions().execute() && !text_region.permissions().write());
-        assert!(data_region.permissions().read() && data_region.permissions().write());
-        assert!(rodata_region.permissions().read() && !rodata_region.permissions().write());
-        assert!(stack_region.permissions().read() && stack_region.permissions().write());
-        assert!(heap_region.permissions().read() && heap_region.permissions().write());
+        let text = find_region(&regions, test_process_regions as usize);
+        let data = find_region(&regions, unsafe { ptr::addr_of!(DATA_VAR) } as usize);
+        let rodata = find_region(&regions, ptr::addr_of!(RODATA_VAR) as usize);
+        let stack = find_region(&regions, ptr::addr_of!(stack_var) as usize);
+        let heap = find_region(&regions, ptr::addr_of!(*heap_var) as usize);
 
-        assert_eq!(text_region.path().unwrap().file_name().unwrap(), file);
-        assert_eq!(data_region.path().unwrap().file_name().unwrap(), file);
-        assert_eq!(rodata_region.path().unwrap().file_name().unwrap(), file);
+        assert!(text.permissions().exec() && !text.permissions().write());
+        assert!(data.permissions().read() && data.permissions().write());
+        assert!(rodata.permissions().read() && !rodata.permissions().write());
+        assert!(stack.permissions().read() && stack.permissions().write());
+        assert!(heap.permissions().read() && heap.permissions().write());
+
+        assert_eq!(text.path().and_then(Path::file_name), Some(exe_name));
+        assert_eq!(data.path().and_then(Path::file_name), Some(exe_name));
+        assert_eq!(rodata.path().and_then(Path::file_name), Some(exe_name));
+        assert_eq!(stack.path(), None);
+        assert_eq!(heap.path(), None);
     }
 
     #[test]
     fn test_process_path() {
-        let process = Process::open(std::process::id()).unwrap();
-        let process_path = process.path().unwrap();
-        let current_exe = std::env::current_exe().unwrap();
-        let file = current_exe.file_name().unwrap();
+        let proc = Process::open(process::id()).unwrap();
+        let proc_path = proc.path().unwrap();
+        let exe_path = env::current_exe().unwrap();
+        let exe_name = exe_path.file_name().unwrap();
 
-        assert_eq!(process_path.file_name().unwrap(), file);
+        assert_eq!(proc_path.file_name(), Some(exe_name));
     }
 
     #[test]
     fn test_memory_read() {
-        let id = std::process::id();
-        let memory = Memory::options().read(true).open(id).unwrap();
-        let secret: u32 = 1337;
-        let mut buf = [0; std::mem::size_of::<u32>()];
+        let memory = Memory::options().read(true).open(process::id()).unwrap();
+        let mut buf = u32::to_ne_bytes(0);
+        let secret = u32::to_ne_bytes(1337);
+        let addr = ptr::addr_of!(secret) as usize;
 
-        memory
-            .read(&mut buf, std::ptr::addr_of!(secret) as usize)
-            .unwrap();
-
-        assert_eq!(secret, u32::from_ne_bytes(buf));
+        memory.read(&mut buf, addr).unwrap();
+        assert!(memory.read(&mut buf, 0).is_err());
+        assert_eq!(secret, buf);
     }
 
     #[test]
     fn test_memory_write() {
-        let id = std::process::id();
-        let memory = Memory::options().write(true).open(id).unwrap();
-        let secret: u32 = 0;
+        let memory = Memory::options().write(true).open(process::id()).unwrap();
         let buf = u32::to_ne_bytes(1337);
+        let secret = u32::to_ne_bytes(0);
+        let addr = ptr::addr_of!(secret) as usize;
 
-        memory
-            .write(&buf, std::ptr::addr_of!(secret) as usize)
-            .unwrap();
-
-        assert_eq!(secret, 1337);
+        memory.write(&buf, addr).unwrap();
+        assert!(memory.write(&buf, 0).is_err());
+        assert_eq!(secret, buf);
     }
 }
