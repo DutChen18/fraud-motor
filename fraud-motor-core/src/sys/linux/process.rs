@@ -1,7 +1,6 @@
-use std::fs::{self, File, OpenOptions, ReadDir};
+use std::fs::{self, File, ReadDir};
 use std::io::{self, BufRead, BufReader, Lines};
 use std::marker::PhantomData;
-use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
 pub struct List(ReadDir);
@@ -25,10 +24,6 @@ pub struct Permissions {
     write: bool,
     exec: bool,
 }
-
-pub struct Memory(File);
-
-pub struct Options(OpenOptions);
 
 impl Iterator for List {
     type Item = io::Result<u32>;
@@ -115,36 +110,6 @@ impl Permissions {
 
     pub fn exec(&self) -> bool {
         self.exec
-    }
-}
-
-impl Memory {
-    pub fn open(id: u32, options: &Options) -> io::Result<Memory> {
-        options.0.open(format!("/proc/{}/mem", id)).map(Memory)
-    }
-
-    pub fn read(&self, buf: &mut [u8], addr: usize) -> io::Result<()> {
-        self.0.read_exact_at(buf, addr as u64)
-    }
-
-    pub fn write(&self, buf: &[u8], addr: usize) -> io::Result<()> {
-        self.0.write_all_at(buf, addr as u64)
-    }
-}
-
-impl Options {
-    pub fn new() -> Options {
-        Options(OpenOptions::new())
-    }
-
-    pub fn read(&mut self, read: bool) -> &mut Options {
-        self.0.read(read);
-        self
-    }
-
-    pub fn write(&mut self, write: bool) -> &mut Options {
-        self.0.write(write);
-        self
     }
 }
 

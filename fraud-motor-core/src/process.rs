@@ -12,10 +12,6 @@ pub struct Region(process_imp::Region);
 
 pub struct Permissions(process_imp::Permissions);
 
-pub struct Memory(process_imp::Memory);
-
-pub struct Options(process_imp::Options);
-
 impl Iterator for List {
     type Item = io::Result<u32>;
 
@@ -75,36 +71,6 @@ impl Permissions {
 
     pub fn exec(&self) -> bool {
         self.0.exec()
-    }
-}
-
-impl Memory {
-    pub fn options() -> Options {
-        Options(process_imp::Options::new())
-    }
-
-    pub fn read(&self, buf: &mut [u8], addr: usize) -> io::Result<()> {
-        self.0.read(buf, addr)
-    }
-
-    pub fn write(&self, buf: &[u8], addr: usize) -> io::Result<()> {
-        self.0.write(buf, addr)
-    }
-}
-
-impl Options {
-    pub fn read(&mut self, read: bool) -> &mut Options {
-        self.0.read(read);
-        self
-    }
-
-    pub fn write(&mut self, write: bool) -> &mut Options {
-        self.0.write(write);
-        self
-    }
-
-    pub fn open(&self, id: u32) -> io::Result<Memory> {
-        process_imp::Memory::open(id, &self.0).map(Memory)
     }
 }
 
@@ -180,29 +146,5 @@ mod tests {
         let exe_name = exe_path.file_name().unwrap();
 
         assert_eq!(proc_path.file_name(), Some(exe_name));
-    }
-
-    #[test]
-    fn test_memory_read() {
-        let memory = Memory::options().read(true).open(process::id()).unwrap();
-        let mut buf = u32::to_ne_bytes(0);
-        let secret = u32::to_ne_bytes(1337);
-        let addr = ptr::addr_of!(secret) as usize;
-
-        memory.read(&mut buf, addr).unwrap();
-        assert!(memory.read(&mut buf, 0).is_err());
-        assert_eq!(secret, buf);
-    }
-
-    #[test]
-    fn test_memory_write() {
-        let memory = Memory::options().write(true).open(process::id()).unwrap();
-        let buf = u32::to_ne_bytes(1337);
-        let secret = u32::to_ne_bytes(0);
-        let addr = ptr::addr_of!(secret) as usize;
-
-        memory.write(&buf, addr).unwrap();
-        assert!(memory.write(&buf, 0).is_err());
-        assert_eq!(secret, buf);
     }
 }

@@ -1,4 +1,5 @@
-use crate::process::{Memory, Process, Region};
+use crate::memory::Memory;
+use crate::process::{Process, Region};
 use std::io;
 use std::sync::{Arc, Mutex, Weak};
 
