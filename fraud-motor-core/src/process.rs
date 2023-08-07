@@ -115,6 +115,7 @@ pub fn list() -> io::Result<List> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
     use std::{env, process, ptr};
 
     fn find_region(regions: &[Region], addr: usize) -> &Region {
@@ -127,9 +128,11 @@ mod tests {
     #[test]
     fn test_list() {
         let ids: Vec<_> = list().unwrap().collect::<io::Result<_>>().unwrap();
+        let unique_ids: HashSet<_> = ids.iter().copied().collect();
 
         assert!(ids.contains(&process::id()));
         assert!(ids.len() > 1);
+        assert_eq!(ids.len(), unique_ids.len());
     }
 
     #[test]

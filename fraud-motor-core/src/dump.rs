@@ -64,14 +64,47 @@ mod tests {
     use super::*;
     use std::process;
 
+    fn any_permissions(region: &Region) -> bool {
+        region.permissions().read() || region.permissions().write() || region.permissions().exec()
+    }
+
+    #[test]
+    fn test_region_dump() {
+        let id = process::id();
+        let memory = Memory::options().read(true).open(id).unwrap();
+        let proc = Process::open(id).unwrap();
+
+        for region in proc.regions().unwrap() {
+            let region = region.unwrap();
+
+            if any_permissions(&region) {
+                let dump_0 = RegionDump::new(&memory, &region);
+                let dump_1 = RegionDump::new(&memory, &region);
+
+                if let Ok(dump0) = dump_0 {
+                    let dump1 = dump_1.unwrap();
+
+                    if dump0.data().as_ptr() != dump1.data().as_ptr() {
+                        assert_ne!(dump0.data(), dump1.data());
+                        assert!(!region.permissions().exec());
+                    }
+                } else {
+                    assert!(dump_1.is_err());
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_process_dump() {
         let id = process::id();
         let memory = Memory::options().read(true).open(id).unwrap();
         let proc = Process::open(id).unwrap();
-        let dump = ProcessDump::new(&memory, &proc, |_| true).unwrap();
+        let dump = ProcessDump::new(&memory, &proc, any_permissions).unwrap();
 
         for (region, dump) in dump.regions() {
+            assert!(any_permissions(&region));
+
             if let Ok(dump) = dump {
                 assert_eq!(region.end() - region.start(), dump.data().len());
             }
