@@ -7,6 +7,11 @@ pub struct RegionDump(Arc<[u8]>);
 
 pub struct ProcessDump(Box<[(Region, io::Result<RegionDump>)]>);
 
+pub struct DumpView<'a> {
+    regions: &'a [(Region, io::Result<RegionDump>)],
+    last: Option<(&'a Region, &'a RegionDump)>,
+}
+
 static REGION_DUMP_POOL: Mutex<Vec<Weak<[u8]>>> = Mutex::new(Vec::new());
 
 impl RegionDump {
@@ -58,6 +63,32 @@ impl ProcessDump {
     pub fn regions(&self) -> &[(Region, io::Result<RegionDump>)] {
         &self.0
     }
+
+    pub fn view(&self) -> DumpView {
+        DumpView {
+            regions: &self.0,
+            last: None,
+        }
+    }
+}
+
+impl<'a> DumpView<'a> {
+    pub fn data(&mut self, addr: usize) -> Option<&[u8]> {
+        if let Some((region, dump)) = self.last {
+            if addr >= region.start() && addr < region.end() {
+                return Some(&dump.data()[addr - region.start()..]);
+            }
+        }
+
+        let (region, dump) = self
+            .regions
+            .iter()
+            .find(|(region, _)| addr >= region.start() && addr < region.end())
+            .and_then(|(region, dump)| Some((region, dump.as_ref().ok()?)))?;
+
+        self.last = Some((region, dump));
+        Some(&dump.data()[addr - region.start()..])
+    }
 }
 
 #[cfg(test)]
@@ -102,12 +133,14 @@ mod tests {
         let memory = Memory::options().read(true).open(id).unwrap();
         let proc = Process::open(id).unwrap();
         let dump = ProcessDump::new(&memory, &proc, any_permissions).unwrap();
+        let mut view = dump.view();
 
         for (region, dump) in dump.regions() {
             assert!(any_permissions(&region));
 
             if let Ok(dump) = dump {
                 assert_eq!(region.end() - region.start(), dump.data().len());
+                assert_eq!(view.data(region.start()).unwrap(), dump.data());
             }
         }
     }
