@@ -2,4 +2,5 @@
 
 members = [
 	"fraud-motor-core",
+	"fraud-motor-cli",
 ]
